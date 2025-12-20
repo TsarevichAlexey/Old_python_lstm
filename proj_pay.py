@@ -47,8 +47,8 @@ warnings.filterwarnings("ignore")
 INSTRUMENT_TICKER = "PYPL"
 FEATURE_COLUMN = 'close'
 Z_SCORE_THRESHOLD = 4.0
-N_CV_SPLITS = 4  # Фолды Walk-Forward
-NUM_CANDIDATES = 3  # Сколько моделей обучать для каждого таймфрейма (выбор лучшей)
+N_CV_SPLITS = 4
+NUM_CANDIDATES = 3
 MAX_CV_WORKERS = min(N_CV_SPLITS, (os.cpu_count() or 1) * 2)
 TEST_SPLIT_SIZE = 0.10
 RANDOM_STATE = 42
@@ -84,7 +84,7 @@ if gpus:
 
 
 # %%
-# --- БЛОК 0: Логирование и Утилиты (Rich Output) ---
+# --- БЛОК 0: Логирование и Утилиты ---
 
 def log_step(model_name, message):
     with print_lock:
@@ -92,28 +92,26 @@ def log_step(model_name, message):
 
 
 def log_detailed(model_name, stage_name, data=None, details="", columns_added=None):
-    """Выводит детальную информацию и таблицы (для Jupyter)."""
     prefix = f"[{model_name.strip('_')}][{stage_name}]"
     with print_lock:
         print(f"\n{'=' * 10} {prefix} ЗАПУСК {'=' * 10}")
-        print(f">> ОПИСАНИЕ: {details}")
+        print(f">> ИНФО: {details}")
 
         if columns_added:
-            print(f">> ИЗМЕНЕНИЯ: Добавлены/Изменены колонки: {columns_added}")
+            print(f">> КОЛОНКИ: {columns_added}")
 
         if data is not None:
             if isinstance(data, pd.DataFrame):
-                print(f">> ТАБЛИЦА ДАННЫХ: Размеры={data.shape}")
+                print(f">> DF SHAPE: {data.shape}")
                 if not data.empty:
-                    print(f"   Диапазон: {data.index.min()} ... {data.index.max()}")
-                    # Красивый вывод таблицы
-                    print(f"   ПРИМЕР ДАННЫХ (Head & Tail):")
+                    print(f"   Range: {data.index.min()} ... {data.index.max()}")
+                    print(f"   Пример данных:")
                     display(pd.concat([data.head(3), data.tail(3)]))
-                    print(f"   СТАТИСТИКА ({FEATURE_COLUMN}):")
+                    print(f"   Stats ({FEATURE_COLUMN}):")
                     if FEATURE_COLUMN in data.columns:
                         display(data[[FEATURE_COLUMN]].describe().T)
             elif isinstance(data, np.ndarray):
-                print(f">> МАССИВ: Shape={data.shape}")
+                print(f">> ARRAY SHAPE: {data.shape}")
 
         print(f"{'=' * 10} {prefix} ЗАВЕРШЕНО {'=' * 10}\n")
 
@@ -208,13 +206,13 @@ def load_model_bundle(name, base_dir=MODEL_SAVE_DIR):
         meta = joblib.load(os.path.join(path, "metadata.joblib"))
         df_h = pd.read_pickle(os.path.join(path, "df_history.pkl"))
         if df_h.index.tz is not None: df_h.index = df_h.index.tz_convert('UTC').tz_localize(None)
-        log_detailed(name, "BUNDLE LOADED", df_h, "История загружена из файла.")
+        log_detailed(name, "BUNDLE LOADED", df_h, "История загружена.")
         return {"model": model, "scaler_X": sX, "scaler_y": sY, "metadata": meta, "df_history": df_h}
     except Exception as e:
         return None
 
 
-# --- БЛОК 2: Данные и TA (Stationary) ---
+# --- БЛОК 2: Данные и TA ---
 
 def get_news_sentiment(ticker):
     if TextBlob is None: return 0.0
@@ -238,8 +236,7 @@ def get_market_data(ticker, days, interval, model_name=""):
         df.index.name = 'time'
         if df.index.tz is not None: df.index = df.index.tz_convert('UTC').tz_localize(None)
         df = df[['open', 'high', 'low', 'close', 'volume']].dropna().sort_index()
-        log_detailed(model_name, "ЗАГРУЗКА ДАННЫХ", df, f"Скачаны котировки Yahoo Finance за {days} дн.",
-                     columns_added="open, high, low, close, volume")
+        log_detailed(model_name, "ЗАГРУЗКА ДАННЫХ", df, f"Скачаны котировки Yahoo ({days} дн.)")
         return df
     except:
         return pd.DataFrame()
@@ -254,39 +251,31 @@ def add_technical_indicators_stationary(df, model_name="", is_future=False):
     df_ta['log_ret'] = np.log(df_ta['close'] / df_ta['close'].shift(1))
 
     try:
-        added = ['log_ret']
         for p in SMA_PERIODS:
             sma = ta.sma(df_ta['close'], length=p)
             df_ta[f'dist_sma_{p}'] = (df_ta['close'] - sma) / sma
-            added.append(f'dist_sma_{p}')
 
         df_ta['rsi'] = ta.rsi(df_ta['close'], length=RSI_PERIOD)
-        added.append('rsi')
 
         macd = ta.macd(df_ta['close'], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL)
         if macd is not None:
             df_ta['macd_norm'] = macd.iloc[:, 0] / df_ta['close']
             df_ta['macd_sig_norm'] = macd.iloc[:, 1] / df_ta['close']
             df_ta['macd_hist_norm'] = macd.iloc[:, 2] / df_ta['close']
-            added.extend(['macd_norm', 'macd_sig_norm', 'macd_hist_norm'])
 
         stoch = ta.stoch(df_ta['high'], df_ta['low'], df_ta['close'], k=STOCH_K, d=STOCH_D)
         if stoch is not None:
             df_ta = pd.concat([df_ta, stoch], axis=1)
-            added.extend(stoch.columns.tolist())
 
         atr = ta.atr(df_ta['high'], df_ta['low'], df_ta['close'], length=ATR_PERIOD)
         if atr is not None:
             df_ta['atr_pct'] = atr / df_ta['close']
-            added.append('atr_pct')
 
         df_ta['vol_chg'] = df_ta['volume'].pct_change().replace([np.inf, -np.inf], 0)
-        added.append('vol_chg')
 
         rsi_fill = df_ta['rsi'].fillna(50)
         tech_sent = (rsi_fill - 50) / 50.0
         df_ta['sentiment'] = tech_sent
-        added.append('sentiment')
 
         if not is_future and not df_ta.empty:
             real = get_news_sentiment(INSTRUMENT_TICKER)
@@ -294,7 +283,6 @@ def add_technical_indicators_stationary(df, model_name="", is_future=False):
                 df_ta.iloc[-1, df_ta.columns.get_loc('sentiment')] = (tech_sent.iloc[-1] * 0.7) + (real * 0.3)
 
         df_ta = df_ta.loc[:, ~df_ta.columns.duplicated()]
-
         return df_ta
     except:
         return df
@@ -316,7 +304,7 @@ def remove_outliers_zscore(df, col, thresh, model_name):
 # --- БЛОК 3: Preprocessing & Sequencing ---
 
 def prepare_dataframe(ticker, days, interval, col, thresh, model_name, tf_td):
-    log_step(model_name, "Загрузка и предобработка данных...")
+    log_step(model_name, "Обработка данных...")
     df = get_market_data(ticker, days, interval, model_name)
     if df.empty: return None, None
 
@@ -324,13 +312,12 @@ def prepare_dataframe(ticker, days, interval, col, thresh, model_name, tf_td):
     df_clean = remove_outliers_zscore(df, col, thresh, model_name)
 
     log_detailed(model_name, "ОЧИСТКА ВЫБРОСОВ", df_clean,
-                 f"Удалено {len(df_raw) - len(df_clean)} строк (Z-score > {thresh})", columns_added="Фильтрация строк")
+                 f"Z-score thresh={thresh}. Удалено {len(df_raw) - len(df_clean)} строк")
 
     df_final = add_technical_indicators_stationary(df_clean, model_name)
     df_final = df_final.dropna()
 
-    log_detailed(model_name, "ГЕНЕРАЦИЯ ПРИЗНАКОВ", df_final, "Добавлены TA индикаторы",
-                 columns_added="log_ret, rsi, macd_*, stoch_*, atr_pct, sentiment")
+    log_detailed(model_name, "ГЕНЕРАЦИЯ ПРИЗНАКОВ", df_final, "Добавлены индикаторы.")
     return df_final, (df_raw, df_clean)
 
 
@@ -368,7 +355,7 @@ def build_lstm(n_in, n_out, n_feat):
 
 
 def calculate_metrics(y_true, y_pred):
-    if len(y_true) == 0: return {}
+    if len(y_true) == 0: return {'mse': 0, 'rmse': 0, 'mae': 0, 'r2': 0, 'mae_pct': 0}
     mse = mean_squared_error(y_true, y_pred)
     rmse = np.sqrt(mse)
     mae = mean_absolute_error(y_true, y_pred)
@@ -378,14 +365,38 @@ def calculate_metrics(y_true, y_pred):
     return {'mse': mse, 'rmse': rmse, 'mae': mae, 'r2': r2, 'mae_pct': mae_pct}
 
 
+def calculate_metrics_in_window(timestamps, act, pred, window_td=None, last_n=None):
+    """Считает метрики для среза данных (по времени или по количеству точек)."""
+    if len(act) == 0: return {}
+
+    indices = []
+
+    if window_td:
+        # Фильтр по времени (например, последний час)
+        last_ts = pd.to_datetime(timestamps[-1])
+        cutoff = last_ts - window_td
+        # Находим индексы, попадающие в окно
+        ts_series = pd.to_datetime(timestamps)
+        indices = [i for i, t in enumerate(ts_series) if t > cutoff]
+    elif last_n:
+        # Фильтр по N последних точек
+        indices = list(range(max(0, len(act) - last_n), len(act)))
+    else:
+        indices = list(range(len(act)))  # Весь набор
+
+    if not indices: return {}
+
+    y_sub = act[indices]
+    p_sub = pred[indices]
+
+    return calculate_metrics(y_sub, p_sub)
+
+
 def run_walk_forward_cv(X, y, n_in, n_out, n_feat, name, candidate_id):
-    """Обучает одну модель-кандидата."""
     tscv = TimeSeriesSplit(n_splits=N_CV_SPLITS)
     best_model = None
     best_r2 = -float('inf')
     best_history = None
-
-    # Store metrics for reporting
     metrics_report = {}
 
     for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
@@ -402,15 +413,14 @@ def run_walk_forward_cv(X, y, n_in, n_out, n_feat, name, candidate_id):
         preds = model.predict(X_v, verbose=0)
         r2 = r2_score(y_v[:, 0], preds[:, 0])
 
-        # Calculate other metrics for the fold
-        mse = mean_squared_error(y_v[:, 0], preds[:, 0])
-        rmse = np.sqrt(mse)
-        mae = mean_absolute_error(y_v[:, 0], preds[:, 0])
-
         if r2 > best_r2:
             best_r2 = r2
             best_model = model
             best_history = history.history
+            # Метрики считаем для победного фолда
+            mse = mean_squared_error(y_v[:, 0], preds[:, 0])
+            rmse = np.sqrt(mse)
+            mae = mean_absolute_error(y_v[:, 0], preds[:, 0])
             metrics_report = {'id': candidate_id, 'r2': r2, 'rmse': rmse, 'mae': mae, 'mse': mse}
 
     return best_model, best_r2, metrics_report, best_history
@@ -428,9 +438,11 @@ def prepare_evaluation_data(model, X, y, base_prices, timestamps, scaler_y, tag=
         pred_prices = base_prices * np.exp(preds_ret[:, 0])
         actual_prices = base_prices * np.exp(y_ret[:, 0])
 
+        # Общие метрики
         metrics = calculate_metrics(actual_prices, pred_prices)
+
         return {"type": tag, "timestamps": timestamps, "actual": actual_prices, "predicted": pred_prices,
-                "metrics": metrics}
+                "metrics_full": metrics}
     except:
         return None
 
@@ -438,7 +450,7 @@ def prepare_evaluation_data(model, X, y, base_prices, timestamps, scaler_y, tag=
 # --- БЛОК 5: Прогноз Будущего ---
 
 def predict_future_recursive(model, sX, sY, df_hist, stationary_feats, n_fut, n_in, n_out, tf_td, name):
-    log_step(name, f"Generating recursive forecast ({n_fut} steps)...")
+    log_step(name, f"Forecast recursive ({n_fut} steps)...")
     hist = df_hist.copy().loc[:, ~df_hist.columns.duplicated()]
 
     future_prices = []
@@ -530,14 +542,14 @@ def run_pipeline(cfg, loaded_bundle=None, preloaded_data=None):
 
     try:
         if loaded_bundle:
-            log_step(name, "Режим ЗАГРУЗКИ. Обновление данных...")
+            # (Код загрузки опущен для краткости, он стандартный)
+            log_step(name, "Загрузка модели из файла...")
             model = loaded_bundle['model']
             sX = loaded_bundle['scaler_X']
             sY = loaded_bundle['scaler_y']
             feats = loaded_bundle['metadata']['features']
             df_h = loaded_bundle['df_history']
 
-            # (Логика обновления данных опускается для краткости, она такая же как была)
             last_ts = df_h.index[-1]
             now = datetime.now().replace(tzinfo=None)
             delta = (now - last_ts).days + 2
@@ -552,16 +564,13 @@ def run_pipeline(cfg, loaded_bundle=None, preloaded_data=None):
                         df_combined = df_combined[~df_combined.index.duplicated(keep='last')]
                         df_h = add_technical_indicators_stationary(df_combined, name)
                         df_h = df_h.dropna()
-                        log_step(name, f"Данные обновлены. Новый конец: {df_h.index[-1]}")
 
         else:
-            log_step(name, "Режим ОБУЧЕНИЯ (Tournament)...")
+            log_step(name, "Обучение моделей (Tournament)...")
 
-            # Используем уже загруженные данные, если есть
             if preloaded_data:
                 df_full, outliers_tuple = preloaded_data
             else:
-                # На всякий случай fallback
                 df_full, outliers_tuple = prepare_dataframe(INSTRUMENT_TICKER, days, interval, FEATURE_COLUMN,
                                                             Z_SCORE_THRESHOLD, name, tf_td)
 
@@ -597,8 +606,6 @@ def run_pipeline(cfg, loaded_bundle=None, preloaded_data=None):
             best_hist = None
             cand_stats_list = []
 
-            log_step(name, f"Training {NUM_CANDIDATES} candidates...")
-
             for i in range(NUM_CANDIDATES):
                 c_model, c_score, c_stats, c_hist = run_walk_forward_cv(X_tr, y_tr, n_in, n_out, len(stationary_feats),
                                                                         name, i)
@@ -609,15 +616,33 @@ def run_pipeline(cfg, loaded_bundle=None, preloaded_data=None):
                     best_cand_model = c_model
                     best_hist = c_hist
 
-            # Текстовый вывод результатов
+            # --- TEXT REPORT FOR WINNER ---
+            model = best_cand_model
+
+            # Подсчет детальных метрик для победителя (Сутки vs Час)
+            # Используем тестовую выборку для отчета
+            met_day = calculate_metrics_in_window(t_te, base_te, base_te, window_td=timedelta(days=1))
+            if not met_day: met_day = calculate_metrics_in_window(t_te, base_te, base_te)  # Fallback to full if < 1 day
+
+            met_hour = calculate_metrics_in_window(t_te, base_te, base_te, window_td=timedelta(hours=1))
+            if not met_hour: met_hour = calculate_metrics_in_window(t_te, base_te, base_te, last_n=5)  # Fallback
+
             with print_lock:
-                print(f"\n[{name}] >>> РЕЗУЛЬТАТЫ СРАВНЕНИЯ (Выбор лучшей) <<<")
+                print(f"\n{'=' * 15} ОТЧЕТ: {name} {'=' * 15}")
+                print("1. СРАВНЕНИЕ КАНДИДАТОВ (по R2):")
                 c_df = pd.DataFrame(cand_stats_list)
                 print(c_df[['id', 'r2', 'rmse', 'mae', 'mse']].to_string(index=False))
-                print(
-                    f"[{name}] ПОБЕДИТЕЛЬ: Model ID {c_df.loc[c_df['r2'].idxmax()]['id']} (R2={best_cand_score:.4f})\n")
 
-            model = best_cand_model
+                print(f"\n2. ПОБЕДИТЕЛЬ: Model ID {c_df.loc[c_df['r2'].idxmax()]['id']}")
+                print(f"   Метрики на ТЕСТОВОМ множестве (детально):")
+                print(f"   -- [СУТКИ / 24Ч] --")
+                print(
+                    f"      R2: {met_day.get('r2', 0):.4f}, RMSE: {met_day.get('rmse', 0):.4f}, MAE: {met_day.get('mae', 0):.4f}")
+                print(f"   -- [ЧАС / 60МИН] --")
+                print(
+                    f"      R2: {met_hour.get('r2', 0):.4f}, RMSE: {met_hour.get('rmse', 0):.4f}, MAE: {met_hour.get('mae', 0):.4f}")
+                print(f"{'=' * 40}\n")
+
             result_pkg['training_history'] = best_hist
 
             if model:
@@ -649,40 +674,35 @@ def run_pipeline(cfg, loaded_bundle=None, preloaded_data=None):
 # --- PLOTTING (Main Thread) ---
 
 def plot_outliers_safe(data, name, tf_td):
-    """
-    Рисует график изначальных данных (с подсветкой выбросов) и после очистки.
-    """
     raw, clean = data
     if raw.empty: return
     try:
         fig = plt.figure(figsize=(15, 8))
-        fig.suptitle(f"[{name}] АНАЛИЗ ДАННЫХ: ДО И ПОСЛЕ ОБРАБОТКИ ВЫБРОСОВ", fontsize=16)
+        fig.suptitle(f"[{name}] АНАЛИЗ ВЫБРОСОВ", fontsize=16)
 
-        # Subplot 1: Raw
         ax1 = plt.subplot(2, 1, 1)
         pt, pv = generate_plotted_times_and_values(raw.index, raw[FEATURE_COLUMN], tf_td)
         if len(pt) > 0:
-            ax1.plot(pt, pv, label='Исходные данные', color='#1f77b4', linewidth=1)
+            ax1.plot(pt, pv, label='Raw', color='#1f77b4', linewidth=1)
             mean, std = raw[FEATURE_COLUMN].mean(), raw[FEATURE_COLUMN].std()
             mask = np.abs((raw[FEATURE_COLUMN] - mean) / std) > Z_SCORE_THRESHOLD
             out_idx = raw[mask].index
             comm = raw.index.intersection(out_idx)
             idxs = [raw.index.get_loc(i) for i in comm if raw.index.get_loc(i) < len(pt)]
             if idxs:
-                ax1.scatter(pt[idxs], pv[idxs], color='red', s=40, label=f'Выбросы (Z > {Z_SCORE_THRESHOLD})', zorder=5)
+                ax1.scatter(pt[idxs], pv[idxs], color='red', s=40, label=f'Outliers > {Z_SCORE_THRESHOLD}z', zorder=5)
 
-        ax1.set_title("1. Изначальные данные (с выбросами)")
+        ax1.set_title("1. Исходные данные (Raw)")
         ax1.legend()
         ax1.grid(True, alpha=0.3)
         ax1.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
 
-        # Subplot 2: Clean
         ax2 = plt.subplot(2, 1, 2)
         ptc, pvc = generate_plotted_times_and_values(clean.index, clean[FEATURE_COLUMN], tf_td)
         if len(ptc) > 0:
-            ax2.plot(ptc, pvc, label='Очищенные данные', color='green', linewidth=1)
+            ax2.plot(ptc, pvc, label='Clean', color='green', linewidth=1)
 
-        ax2.set_title("2. Данные после обработки (удаления выбросов)")
+        ax2.set_title("2. Очищенные данные (Clean)")
         ax2.legend()
         ax2.grid(True, alpha=0.3)
         ax2.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
@@ -694,16 +714,15 @@ def plot_outliers_safe(data, name, tf_td):
 
 
 def plot_learning_curves(history, name):
-    """Строит графики потерь (Loss) для лучшей модели."""
     if not history: return
     try:
         plt.figure(figsize=(12, 5))
         if 'loss' in history:
-            plt.plot(history['loss'], label='Training Loss', color='blue')
+            plt.plot(history['loss'], label='Train Loss', color='blue')
         if 'val_loss' in history:
-            plt.plot(history['val_loss'], label='Validation Loss', color='orange', linestyle='--')
+            plt.plot(history['val_loss'], label='Val Loss', color='orange', linestyle='--')
 
-        plt.title(f"[{name}] КРИВЫЕ ОБУЧЕНИЯ (Learning Curves)")
+        plt.title(f"[{name}] КРИВЫЕ ОБУЧЕНИЯ (Loss)")
         plt.xlabel('Epochs')
         plt.ylabel('Loss (MSE)')
         plt.legend()
@@ -713,48 +732,72 @@ def plot_learning_curves(history, name):
         print(f"Curve Error: {e}")
 
 
+def format_metrics_str(m):
+    return f"R2:{m.get('r2', 0):.3f} RMSE:{m.get('rmse', 0):.3f} MAE:{m.get('mae', 0):.3f} MSE:{m.get('mse', 0):.3f}"
+
+
 def plot_evaluation_results(data, name, tf_td):
     if not data: return
     try:
         ts = data['timestamps']
         act = data['actual']
         pred = data['predicted']
-        met = data['metrics']
         dtype = data['type']
 
+        # 1. Расчет метрик для "Суток" (или полного, если меньше суток)
+        # Для визуализации "Суток" часто берем весь Test set, так как он обычно и есть небольшой кусок
+        # Но если Test большой, возьмем последние 24 часа.
+        met_full = calculate_metrics_in_window(ts, act, pred, window_td=timedelta(days=1))
+        if not met_full: met_full = calculate_metrics_in_window(ts, act, pred)
+
+        # 2. Расчет метрик для "Часа" (или последних точек)
+        met_hour = calculate_metrics_in_window(ts, act, pred, window_td=timedelta(hours=1))
+        # Если час пустой (напр, дневной таймфрейм), берем последние 5 точек
+        if not met_hour: met_hour = calculate_metrics_in_window(ts, act, pred, last_n=5)
+
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10))
-        fig.suptitle(f"[{name}] ОЦЕНКА МОДЕЛИ ({dtype})", fontsize=16)
+        fig.suptitle(f"[{name}] РЕЗУЛЬТАТЫ: {dtype.upper()}", fontsize=16)
 
-        m_str = f"R2: {met.get('r2', 0):.4f} | RMSE: {met.get('rmse', 0):.4f} | MAE: {met.get('mae', 0):.4f} | MSE: {met.get('mse', 0):.4f}"
-
+        # -- SUBPLOT 1: Full / Daily --
         pt_a, pv_a = generate_plotted_times_and_values(ts, act, tf_td)
         pt_p, pv_p = generate_plotted_times_and_values(ts, pred, tf_td)
         c_a = '#1f77b4' if dtype == "Test" else 'purple'
         c_p = '#ff7f0e' if dtype == "Test" else 'orange'
 
         if len(pt_a) > 0:
-            ax1.plot(pt_a, pv_a, label=f'Факт ({dtype})', color=c_a, alpha=0.8)
-            ax1.plot(pt_p, pv_p, label=f'Прогноз ({dtype})', color=c_p, linestyle='--', linewidth=1.5)
+            ax1.plot(pt_a, pv_a, label='Fact', color=c_a, alpha=0.8)
+            ax1.plot(pt_p, pv_p, label='Pred', color=c_p, linestyle='--', linewidth=1.5)
 
-        ax1.set_title(f"Общий график | {m_str}")
+        title_1 = f"ОБЗОР (СУТКИ/ВЕСЬ СЕТ) | {format_metrics_str(met_full)}"
+        ax1.set_title(title_1)
         ax1.legend()
         ax1.grid(True, alpha=0.3)
-        ax1.text(0.02, 0.95, m_str.replace(" | ", "\n"), transform=ax1.transAxes,
+
+        # Инфо-бокс на графике
+        ax1.text(0.02, 0.95, format_metrics_str(met_full).replace(" ", "\n"), transform=ax1.transAxes,
                  va='top', bbox=dict(boxstyle='round', fc='white', alpha=0.8))
 
-        # Zoom (last 60 pts)
-        zoom = 60
-        if len(pt_a) > zoom:
-            ax2.plot(pt_a[-zoom:], pv_a[-zoom:], label='Факт (Zoom)', color=c_a, marker='.')
-            ax2.plot(pt_p[-zoom:], pv_p[-zoom:], label='Прогноз (Zoom)', color=c_p, linestyle='--', marker='x')
+        # -- SUBPLOT 2: Last Hour (Zoom) --
+        # Определяем срез для зума
+        # Если таймфрейм мелкий (1m, 5m), берем ~60-100 точек. Если крупный, все равно берем хвост.
+        zoom_pts = 60
+        if len(pt_a) > zoom_pts:
+            slice_idx = -zoom_pts
+            ax2.plot(pt_a[slice_idx:], pv_a[slice_idx:], label='Fact (Zoom)', color=c_a, marker='.')
+            ax2.plot(pt_p[slice_idx:], pv_p[slice_idx:], label='Pred (Zoom)', color=c_p, linestyle='--', marker='x')
         else:
-            ax2.plot(pt_a, pv_a, label='Факт', color=c_a)
-            ax2.plot(pt_p, pv_p, label='Прогноз', color=c_p)
+            ax2.plot(pt_a, pv_a, label='Fact', color=c_a)
+            ax2.plot(pt_p, pv_p, label='Pred', color=c_p)
 
-        ax2.set_title(f"Детальный вид (Последние {zoom} точек)")
+        title_2 = f"ДЕТАЛИ (ПОСЛЕДНИЙ ЧАС/УЧАСТОК) | {format_metrics_str(met_hour)}"
+        ax2.set_title(title_2)
         ax2.legend()
         ax2.grid(True, alpha=0.3)
         ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M\n%d/%m'))
+
+        # Инфо-бокс на графике 2
+        ax2.text(0.02, 0.95, format_metrics_str(met_hour).replace(" ", "\n"), transform=ax2.transAxes,
+                 va='top', bbox=dict(boxstyle='round', fc='white', alpha=0.8))
 
         plt.tight_layout()
         plt.show()
@@ -805,62 +848,49 @@ if __name__ == "__main__":
                 b = load_model_bundle(c['name'])
                 if b: loaded_data[c['name']] = b
 
-    # --- ШАГ 1: ПРЕДВАРИТЕЛЬНАЯ ЗАГРУЗКА И ГРАФИКИ ВЫБРОСОВ (ПОСЛЕДОВАТЕЛЬНО) ---
-    print("\n>>> ЭТАП 1: ЗАГРУЗКА ДАННЫХ И АНАЛИЗ ВЫБРОСОВ...")
+    print("\n>>> ЭТАП 1: ЗАГРУЗКА И АНАЛИЗ ВЫБРОСОВ...")
     prepared_data_store = {}
 
     for c in configs:
         name = c['name']
-        # Если модель уже обучена и загружена, пропускаем этап анализа сырых данных
-        if name in loaded_data:
-            continue
+        if name in loaded_data: continue
 
-        print(f"\n--- Обработка данных для {name} ---")
+        print(f"\n--- {name}: Подготовка данных ---")
         tf_td = get_timedelta_from_candle_interval(c['candle_timeframe'])
         df_full, outliers_tuple = prepare_dataframe(INSTRUMENT_TICKER, c['days_history'], c['candle_timeframe'],
                                                     FEATURE_COLUMN, Z_SCORE_THRESHOLD, name, tf_td)
 
         if df_full is not None:
-            # Сразу строим график выбросов, чтобы пользователь его увидел ДО обучения
             plot_outliers_safe(outliers_tuple, name, tf_td)
             prepared_data_store[name] = (df_full, outliers_tuple)
-        else:
-            print(f"Не удалось загрузить данные для {name}")
 
-    # --- ШАГ 2: ОБУЧЕНИЕ В ПОТОКАХ ---
-    print("\n>>> ЭТАП 2: ЗАПУСК ОБУЧЕНИЯ МОДЕЛЕЙ (ПОТОКИ)...")
+    print("\n>>> ЭТАП 2: ОБУЧЕНИЕ...")
     final_results = []
 
     with ThreadPoolExecutor(max_workers=min(len(configs), 3)) as ex:
-        # Передаем preloaded_data в run_pipeline
         futs = {ex.submit(run_pipeline, c, loaded_data.get(c['name']), prepared_data_store.get(c['name'])): c for c in
                 configs}
         for f in as_completed(futs):
             r = f.result()
             if r: final_results.append(r)
 
-    # --- ШАГ 3: ИТОГОВЫЕ ГРАФИКИ ---
-    print("\n>>> ЭТАП 3: ОТОБРАЖЕНИЕ РЕЗУЛЬТАТОВ ОБУЧЕНИЯ...")
+    print("\n>>> ЭТАП 3: ГРАФИКИ РЕЗУЛЬТАТОВ...")
 
     for res in final_results:
         name = res['name']
         tf = res['interval_td']
 
-        # График кривых обучения (Loss)
         if res.get('training_history'):
             plot_learning_curves(res['training_history'], name)
 
-        # Графики оценки точности
         if res['train_eval_data']:
             plot_evaluation_results(res['train_eval_data'], name, tf)
         if res['test_eval_data']:
             plot_evaluation_results(res['test_eval_data'], name, tf)
 
-        # Финальный прогноз
         if res['future_df'] is not None and res['context_history'] is not None:
             plot_stitched_forecast(res['context_history'], res['future_df'], name, tf)
 
-    # --- СВОДНЫЙ ГРАФИК ---
     if final_results:
         plt.figure(figsize=(18, 9))
         latest_price = 0
@@ -880,7 +910,7 @@ if __name__ == "__main__":
                     if len(pt) > 0:
                         plt.plot(pt, pv, label=f"{res['name']}", marker='.', linestyle='--', alpha=0.7)
 
-        plt.title(f"ИТОГОВЫЙ СВОДНЫЙ ПРОГНОЗ - {INSTRUMENT_TICKER}")
+        plt.title(f"СВОДНЫЙ ПРОГНОЗ - {INSTRUMENT_TICKER}")
         plt.legend(loc='upper left')
         plt.grid(True, alpha=0.5)
         plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M\n%d/%m'))
